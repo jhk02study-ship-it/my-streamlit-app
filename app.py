@@ -1,389 +1,894 @@
 
-import io
 import os
+import io
+import base64
 import smtplib
-import streamlit as st
+from datetime import date
 from email.message import EmailMessage
+
+import streamlit as st
 from openai import OpenAI
 
-# --------------------------------------------------
-# 기본 설정
-# --------------------------------------------------
+
+# ==================================================
+# 1. 기본 환경 설정
+# ==================================================
+
 st.set_page_config(
-    page_title="AIVLE 비서",
+    page_title="AIVLE AI 개인비서",
     page_icon="🤖",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
 
 def get_secret(key, default=""):
     value = os.getenv(key)
     if value:
         return value
+
     try:
         return st.secrets.get(key, default)
     except Exception:
         return default
 
+
 api_key = get_secret("OPENAI_API_KEY")
+
 if not api_key:
-    st.error("OPENAI_API_KEY를 Streamlit Secrets 또는 환경변수에 등록해주세요.")
+    st.error("OPENAI_API_KEY가 등록되지 않았습니다.")
     st.stop()
 
 client = OpenAI(api_key=api_key)
 
-# --------------------------------------------------
-# 상태 초기화
-# --------------------------------------------------
-if "history" not in st.session_state:
-    st.session_state.history = []
 
-if "last_question" not in st.session_state:
-    st.session_state.last_question = ""
+# ==================================================
+# 2. 상태 관리
+# ==================================================
 
-if "last_answer" not in st.session_state:
-    st.session_state.last_answer = ""
+DEFAULTS = {
+    "page": "대시보드",
+    "dashboard_view": "home",
+    "user_name": "사용자",
+    "demo_login": False,
+    "voice": "alloy",
+    "auto_tts": True,
+    "history": [],
+    "meetings": [],
+    "schedules": [],
+    "stt_result": "",
+    "last_answer": "",
+    "last_audio": None,
+    "last_mode": "",
+    "last_question": ""
+}
 
-if "stt_text" not in st.session_state:
-    st.session_state.stt_text = ""
+for key, value in DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-if "tts_audio" not in st.session_state:
-    st.session_state.tts_audio = None
 
-if "voice_name" not in st.session_state:
-    st.session_state.voice_name = "alloy"
+# ==================================================
+# 3. 화면 디자인
+# ==================================================
 
-if "login_name" not in st.session_state:
-    st.session_state.login_name = "ooo님"
-
-# --------------------------------------------------
-# CSS
-# --------------------------------------------------
 st.markdown("""
 <style>
 .block-container {
-    padding-top: 1.2rem;
-    padding-bottom: 1rem;
+    max-width: 1250px;
+    padding-top: 1.4rem;
+    padding-bottom: 2rem;
 }
-.menu-box {
-    border: 1px solid #d9d9d9;
+
+section[data-testid="stSidebar"] {
+    border-right: 1px solid rgba(120, 120, 120, 0.25);
+}
+
+div[data-testid="stButton"] button {
     border-radius: 12px;
-    padding: 0.5rem;
-    background-color: #ffffff08;
+    min-height: 42px;
 }
-.section-card {
-    border: 1px solid #d9d9d9;
-    border-radius: 20px;
-    padding: 1rem 1.2rem;
-    background-color: #ffffff08;
-    margin-bottom: 1rem;
+
+div[data-testid="stPopover"] button {
+    border-radius: 12px;
 }
-.stt-box {
-    border: 2px solid #d9d9d9;
-    border-radius: 24px;
-    padding: 1rem;
-    text-align: center;
-    min-height: 70px;
-    background: #ffffff05;
-    font-size: 1.05rem;
+
+div[data-testid="stTextInput"] input {
+    border-radius: 14px;
 }
-.center-box {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-}
-.small-title {
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: #666;
-    margin-bottom: 0.4rem;
-}
-.answer-card {
-    border: 1px solid #cfcfcf;
+
+div[data-testid="stAudioInput"] {
     border-radius: 16px;
-    padding: 1rem;
-    background-color: #ffffff05;
+}
+
+.main-title {
+    font-size: 1.7rem;
+    font-weight: 750;
+    margin-bottom: .2rem;
+}
+
+.stt-label {
+    font-weight: 650;
+    margin-bottom: .5rem;
+}
+
+.mic-label {
+    text-align: center;
+    font-size: 1.1rem;
+    font-weight: 650;
+    margin: 1rem 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# --------------------------------------------------
-# 공통 함수
-# --------------------------------------------------
-def build_system_prompt(mode, extra_text=""):
-    base = """
-당신은 AI 개인비서 'AIVLE 비서'입니다.
-사용자의 업무를 도와주는 친절하고 정확한 비서 역할을 수행합니다.
-답변은 한국어로 작성하세요.
-필요하면 항목별로 정리하세요.
-불확실한 내용은 추측하지 말고 그 점을 명확히 밝히세요.
+
+# ==================================================
+# 4. 공통 함수
+# ==================================================
+
+def navigate(page, view=None):
+    st.session_state.page = page
+
+    if page == "대시보드":
+        st.session_state.dashboard_view = view or "home"
+
+    st.rerun()
+
+
+def save_history(mode, question, answer):
+    st.session_state.history.append({
+        "mode": mode,
+        "question": question,
+        "answer": answer
+    })
+
+    # 질문과 답변을 하나의 대화로 계산
+    st.session_state.history = st.session_state.history[-10:]
+
+
+def read_text_file(uploaded):
+    if uploaded is None:
+        return ""
+
+    data = uploaded.getvalue()
+
+    if len(data) > 5 * 1024 * 1024:
+        raise ValueError("TXT 파일은 5MB 이하로 첨부하세요.")
+
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp949")
+
+
+def speech_to_text(audio):
+    audio_bytes = io.BytesIO(audio.getvalue())
+    audio_bytes.name = "recording.wav"
+
+    result = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_bytes
+    )
+
+    return result.text
+
+
+def ask_assistant(mode, question, reference="", image=None):
+    system_prompt = """
+당신은 AI 개인비서 '에이블'입니다.
+
+역할:
+- 김 대리의 업무를 지원하는 전문 AI 개인비서
+- 업무 관련 질문에 친절하고 정확하게 답변
+- 문서 및 회의 요약
+- 이메일 작성 및 일정 정리 지원
+
+규칙:
+- 한국어로 답변합니다.
+- 이전 대화의 맥락을 고려합니다.
+- 확인되지 않은 사실은 임의로 만들지 않습니다.
+- 중요한 사항은 보기 쉽게 정리합니다.
 """
+
     if mode == "회의 요약":
-        base += """
-현재 역할은 회의 요약 비서입니다.
-사용자가 준 회의 내용에서 핵심 안건, 결정사항, 담당자, 후속 액션을 정리하세요.
+        system_prompt += """
+회의 내용을 아래 형식으로 정리하세요.
+
+1. 회의 주제
+2. 핵심 논의사항
+3. 결정사항
+4. 담당자별 후속 업무
+5. 미결정 사항
+
+원문에서 확인되지 않는 담당자, 날짜,
+결정사항은 만들어내지 마세요.
 """
+
     elif mode == "일정 관리":
-        base += """
-현재 역할은 일정 관리 비서입니다.
-해야 할 일, 일정, 우선순위, 마감일을 깔끔하게 정리하세요.
-"""
-    elif mode == "웹 리서치":
-        base += """
-현재 역할은 웹 리서치 비서입니다.
-사용자의 질문에 대해 조사 방향, 핵심 포인트, 정리된 요약 형식으로 답변하세요.
-"""
-    else:
-        base += """
-현재 역할은 일반 업무 비서입니다.
-업무 질문, 자료 요약, 정리 요청에 자연스럽게 답변하세요.
+        system_prompt += """
+사용자의 일정을 정리하고 업무 우선순위를
+추천하는 개인비서 역할을 수행하세요.
+
+일정과 마감일이 불명확하다면
+확인되지 않았음을 표시하세요.
 """
 
-    if extra_text:
-        base += f"\n\n참고자료:\n{extra_text[:12000]}"
+    if reference:
+        system_prompt += (
+            "\n\n첨부한 참고자료:\n"
+            + reference[:16000]
+        )
 
-    return base
+    messages = []
 
-
-def ask_ai(mode, question, extra_text=""):
-    system_prompt = build_system_prompt(mode, extra_text=extra_text)
-
-    messages = [{"role": "system", "content": system_prompt}]
-
+    # 최근 5개 대화를 현재 요청에 활용
     for item in st.session_state.history[-5:]:
-        messages.append({"role": "user", "content": item["question"]})
-        messages.append({"role": "assistant", "content": item["answer"]})
+        messages.append({
+            "role": "user",
+            "content": item["question"]
+        })
+        messages.append({
+            "role": "assistant",
+            "content": item["answer"]
+        })
 
-    messages.append({"role": "user", "content": question})
+    user_content = [
+        {"type": "input_text", "text": question}
+    ]
+
+    # 사진 첨부 시 이미지 분석
+    if image is not None:
+        raw = image.getvalue()
+
+        if len(raw) > 8 * 1024 * 1024:
+            raise ValueError("사진은 8MB 이하로 첨부하세요.")
+
+        mime = image.type or "image/png"
+        encoded = base64.b64encode(raw).decode("utf-8")
+
+        user_content.append({
+            "type": "input_image",
+            "image_url": f"data:{mime};base64,{encoded}"
+        })
+
+    messages.append({
+        "role": "user",
+        "content": user_content
+    })
 
     response = client.responses.create(
         model="gpt-4o-mini",
+        instructions=system_prompt,
         input=messages
     )
+
     return response.output_text
 
 
-def make_tts(text):
-    speech = client.audio.speech.create(
+def text_to_speech(text):
+    result = client.audio.speech.create(
         model="tts-1",
-        voice=st.session_state.voice_name,
-        input=text[:4000]
+        voice=st.session_state.voice,
+        input=text[:4000],
+        response_format="mp3"
     )
-    return speech.read()
+
+    return result.read()
 
 
 def send_email(receiver, subject, body):
-    smtp_host = get_secret("SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(get_secret("SMTP_PORT", "465"))
-    smtp_user = get_secret("SMTP_USER")
-    smtp_password = get_secret("SMTP_PASSWORD")
+    host = get_secret("SMTP_HOST", "smtp.gmail.com")
+    port = int(get_secret("SMTP_PORT", "465"))
+    user = get_secret("SMTP_USER")
+    password = get_secret("SMTP_PASSWORD")
 
-    if not smtp_user or not smtp_password:
-        raise ValueError("SMTP_USER / SMTP_PASSWORD가 설정되지 않았습니다.")
+    if not user or not password:
+        raise ValueError("이메일 인증 정보가 없습니다.")
 
-    msg = EmailMessage()
-    msg["From"] = smtp_user
-    msg["To"] = receiver
-    msg["Subject"] = subject
-    msg.set_content(body)
+    if not receiver.strip() or "@" not in receiver:
+        raise ValueError("받는 사람 이메일을 확인하세요.")
 
-    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as server:
-        server.login(smtp_user, smtp_password)
-        server.send_message(msg)
+    if not subject.strip() or not body.strip():
+        raise ValueError("제목과 내용을 입력하세요.")
+
+    message = EmailMessage()
+    message["From"] = user
+    message["To"] = receiver.strip()
+    message["Subject"] = subject
+    message.set_content(body)
+
+    with smtplib.SMTP_SSL(
+        host, port, timeout=20
+    ) as server:
+        server.login(user, password)
+        server.send_message(message)
 
 
-# --------------------------------------------------
-# 좌측 메뉴
-# --------------------------------------------------
+# ==================================================
+# 5. 왼쪽 메뉴 - 실제 페이지 이동
+# ==================================================
+
 with st.sidebar:
-    st.markdown("### AIVLE 비서")
 
-    menu = st.radio(
-        "메뉴",
-        ["대시보드", "회의 요약", "일정 관리", "웹 리서치"],
-        label_visibility="collapsed"
-    )
+    st.title("🤖 AIVLE 비서")
+    st.caption("나만의 AI 업무 개인비서")
+    st.divider()
 
-    st.markdown("---")
-    st.caption("최근 대화")
-    if st.session_state.history:
-        for idx, item in enumerate(reversed(st.session_state.history[-5:]), 1):
-            st.write(f"{idx}. {item['question'][:20]}")
-    else:
-        st.write("아직 대화가 없습니다.")
+    menus = [
+        ("🏠", "대시보드"),
+        ("📝", "회의 요약"),
+        ("📅", "일정 관리")
+    ]
 
-    st.markdown("---")
-    if st.button("대화 기록 초기화"):
+    for emoji, page in menus:
+
+        active = st.session_state.page == page
+
+        if st.button(
+            f"🔴 {emoji} {page}",
+            key=f"nav_{page}",
+            use_container_width=True,
+            type="primary" if active else "secondary"
+        ):
+            navigate(page)
+
+    st.divider()
+    st.subheader("최근 대화")
+
+    if not st.session_state.history:
+        st.caption("아직 저장된 대화가 없습니다.")
+
+    for i, item in enumerate(
+        reversed(st.session_state.history), 1
+    ):
+        if st.button(
+            f"💬 {item['question'][:20]}",
+            key=f"recent_{i}",
+            use_container_width=True
+        ):
+            st.session_state.last_answer = item["answer"]
+            st.session_state.last_question = item["question"]
+            st.session_state.last_mode = "대시보드"
+            st.session_state.last_audio = None
+            navigate("대시보드", "assistant")
+
+    if st.button(
+        "🗑️ 대화 기록 삭제",
+        use_container_width=True
+    ):
         st.session_state.history = []
-        st.session_state.last_question = ""
         st.session_state.last_answer = ""
-        st.session_state.stt_text = ""
-        st.session_state.tts_audio = None
+        st.session_state.last_audio = None
         st.rerun()
 
-# --------------------------------------------------
-# 상단 헤더
-# --------------------------------------------------
-top1, top2 = st.columns([8, 2])
 
-with top1:
-    st.markdown(f"## {menu}")
+# ==================================================
+# 6. 상단 프로필 메뉴
+# ==================================================
 
-with top2:
-    with st.popover(f"🔴 {st.session_state.login_name}"):
-        st.write("로그인/로그아웃")
-        selected_voice = st.selectbox(
-            "비서 음성 설정",
-            ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
-            index=["alloy", "echo", "fable", "onyx", "nova", "shimmer"].index(st.session_state.voice_name)
+header_col, profile_col = st.columns([8, 2])
+
+with header_col:
+    st.markdown(
+        '<div class="main-title">AIVLE 비서</div>',
+        unsafe_allow_html=True
+    )
+
+with profile_col:
+    with st.popover(
+        f"👤 {st.session_state.user_name}님",
+        use_container_width=True
+    ):
+        st.markdown("#### 프로필 설정")
+
+        new_name = st.text_input(
+            "사용자 이름",
+            value=st.session_state.user_name
         )
-        st.session_state.voice_name = selected_voice
 
-        new_name = st.text_input("프로필 설정", value=st.session_state.login_name)
-        if st.button("프로필 저장"):
-            st.session_state.login_name = new_name
-            st.success("프로필이 저장되었습니다.")
+        if st.button("이름 저장"):
+            st.session_state.user_name = (
+                new_name.strip() or "사용자"
+            )
+            st.rerun()
 
-# --------------------------------------------------
-# 공통 입력 영역 함수
-# --------------------------------------------------
-def render_main_input(mode):
-    col_left, col_main = st.columns([1.2, 4.8])
+        st.divider()
 
-    with col_left:
-        st.markdown("### 메뉴")
-        st.markdown("""
-- 🔴 대시보드  
-- 🔴 회의 요약  
-- 🔴 일정 관리  
-- 🔴 웹 리서치
-""")
+        st.markdown("#### 비서 음성 설정")
 
-    with col_main:
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.selectbox(
+            "음성 선택",
+            ["alloy", "echo", "fable",
+             "onyx", "nova", "shimmer"],
+            key="voice"
+        )
 
-        st.markdown("#### 음성을 텍스트로 변환한 값")
-        display_text = st.session_state.stt_text if st.session_state.stt_text else "아직 변환된 내용이 없습니다."
-        st.markdown(f'<div class="stt-box">{display_text}</div>', unsafe_allow_html=True)
+        st.checkbox(
+            "답변 자동 음성 재생",
+            key="auto_tts"
+        )
 
-        st.write("")
-        st.markdown("#### 🎤 음성 입력")
-        audio_value = st.audio_input("음성 녹음", label_visibility="collapsed")
+        st.divider()
 
-        st.write("")
-        attach_col1, attach_col2 = st.columns([1, 1])
+        # 실제 사용자 인증이 아닌 시연용 기능
+        st.caption("데모 로그인 (실제 계정 인증 아님)")
 
-        with attach_col1:
-            uploaded_file = st.file_uploader("파일", type=["txt", "pdf", "csv", "docx"])
-        with attach_col2:
-            uploaded_image = st.file_uploader("사진", type=["png", "jpg", "jpeg"])
+        if not st.session_state.demo_login:
+            if st.button("데모 로그인"):
+                st.session_state.demo_login = True
+                st.rerun()
+        else:
+            st.success("데모 로그인 상태")
 
-        text_question = st.text_input("무엇을 도와드릴까요?", placeholder="무엇을 도와드릴까요?")
-        send_clicked = st.button("➤ 보내기", type="primary", use_container_width=True)
+            if st.button("로그아웃"):
+                st.session_state.demo_login = False
+                st.rerun()
 
-        st.markdown("</div>", unsafe_allow_html=True)
+st.divider()
 
-        # 참고 텍스트
-        extra_text = ""
-        if uploaded_file is not None:
+
+# ==================================================
+# 7. AI 답변, TTS 및 이메일 발송
+# ==================================================
+
+def show_answer(mode):
+
+    if not st.session_state.last_answer:
+        return
+
+    if st.session_state.last_mode != mode:
+        return
+
+    st.divider()
+    st.subheader("🤖 에이블의 답변")
+
+    st.markdown(st.session_state.last_answer)
+
+    # LLM 응답을 음성으로 출력
+    if st.session_state.last_audio is not None:
+        st.audio(
+            st.session_state.last_audio,
+            format="audio/mpeg",
+            autoplay=st.session_state.auto_tts
+        )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button(
+            "🔊 답변 다시 듣기",
+            key=f"tts_{mode}",
+            use_container_width=True
+        ):
             try:
-                extra_text = uploaded_file.read().decode("utf-8")
-            except:
-                extra_text = "업로드된 파일이 있으나 현재 텍스트로 직접 읽지 못했습니다."
-
-        if uploaded_image is not None:
-            extra_text += "\n\n[참고] 이미지 파일이 첨부되었습니다."
-
-        if send_clicked:
-            final_question = text_question.strip()
-
-            # 음성 -> 텍스트
-            if audio_value is not None:
-                try:
-                    with st.spinner("음성을 텍스트로 변환 중입니다..."):
-                        audio_file = io.BytesIO(audio_value.getvalue())
-                        audio_file.name = "audio.wav"
-
-                        transcript = client.audio.transcriptions.create(
-                            model="whisper-1",
-                            file=audio_file
+                with st.spinner("음성을 생성하고 있습니다..."):
+                    st.session_state.last_audio = (
+                        text_to_speech(
+                            st.session_state.last_answer
                         )
-                        st.session_state.stt_text = transcript.text
-                        if not final_question:
-                            final_question = transcript.text
-                except Exception as e:
-                    st.error(f"음성 인식 오류: {e}")
-
-            if not final_question:
-                st.warning("텍스트를 입력하거나 음성을 녹음해주세요.")
-                return
-
-            st.session_state.last_question = final_question
-
-            try:
-                with st.spinner("답변을 생성하고 있습니다..."):
-                    answer = ask_ai(mode, final_question, extra_text=extra_text)
-                    st.session_state.last_answer = answer
-                    st.session_state.tts_audio = None
-
-                    st.session_state.history.append({
-                        "mode": mode,
-                        "question": final_question,
-                        "answer": answer
-                    })
-                    st.session_state.history = st.session_state.history[-10:]
-
+                    )
+                st.rerun()
             except Exception as e:
-                st.error(f"AI 응답 생성 오류: {e}")
+                st.error(f"음성 생성 오류: {e}")
 
-        # 결과 출력
-        if st.session_state.last_answer:
-            st.markdown("### 답변")
-            st.markdown(f'<div class="answer-card">{st.session_state.last_answer}</div>', unsafe_allow_html=True)
+    with col2:
+        with st.popover(
+            "📧 이메일 보내기",
+            use_container_width=True
+        ):
+            receiver = st.text_input(
+                "받는 사람",
+                key=f"receiver_{mode}"
+            )
 
-            btn1, btn2 = st.columns([1, 1])
+            subject = st.text_input(
+                "제목",
+                value="[에이블] 업무 지원 결과",
+                key=f"subject_{mode}"
+            )
 
-            with btn1:
-                if st.button("🔊 답변 음성 듣기"):
-                    try:
-                        with st.spinner("음성을 생성하고 있습니다..."):
-                            st.session_state.tts_audio = make_tts(st.session_state.last_answer)
-                    except Exception as e:
-                        st.error(f"TTS 오류: {e}")
+            body = st.text_area(
+                "이메일 내용",
+                value=st.session_state.last_answer,
+                height=200,
+                key=f"body_{mode}"
+            )
 
-            with btn2:
-                with st.popover("📧 이메일 보내기"):
-                    receiver = st.text_input("받는 사람 이메일")
-                    subject = st.text_input("제목", value=f"[AIVLE 비서] {mode} 결과")
-                    body = st.text_area("내용", value=st.session_state.last_answer, height=200)
-
-                    if st.button("이메일 발송"):
-                        try:
-                            send_email(receiver, subject, body)
-                            st.success("이메일 발송 완료")
-                        except Exception as e:
-                            st.error(f"이메일 발송 오류: {e}")
-
-            if st.session_state.tts_audio:
-                st.audio(st.session_state.tts_audio, format="audio/mpeg")
+            if st.button(
+                "발송",
+                key=f"email_send_{mode}"
+            ):
+                try:
+                    send_email(receiver, subject, body)
+                    st.success("이메일 발송 완료!")
+                except Exception as e:
+                    st.error(f"이메일 발송 오류: {e}")
 
 
-# --------------------------------------------------
-# 페이지별 UI
-# --------------------------------------------------
-if menu == "대시보드":
-    render_main_input("대시보드")
+# ==================================================
+# 8. 손그림의 중앙 AI 입력 화면
+# ==================================================
 
-elif menu == "회의 요약":
-    st.info("최근 회의 요약을 빠르게 정리하는 화면입니다.")
-    render_main_input("회의 요약")
+def assistant_input(mode):
 
-elif menu == "일정 관리":
-    st.info("할 일, 일정, 우선순위를 정리하는 화면입니다.")
-    render_main_input("일정 관리")
+    # STT 변환 결과 출력 영역
+    st.markdown(
+        '<div class="stt-label">음성을 텍스트로 변환한 값</div>',
+        unsafe_allow_html=True
+    )
 
-elif menu == "웹 리서치":
-    st.info("주제 조사, 정보 정리, 조사 포인트 정리에 사용하는 화면입니다.")
-    render_main_input("웹 리서치")
+    stt_placeholder = st.empty()
 
-st.markdown("---")
-st.caption("AIVLE 비서 | 인터페이스 스케치 기반 Streamlit 버전")
+    if st.session_state.stt_result:
+        stt_placeholder.info(st.session_state.stt_result)
+    else:
+        stt_placeholder.info(
+            "마이크로 녹음한 음성이 이곳에 텍스트로 표시됩니다."
+        )
+
+    st.write("")
+
+    # 가운데 마이크
+    left, center, right = st.columns([1, 2, 1])
+
+    with center:
+        st.markdown(
+            '<div class="mic-label">🎤 음성 입력</div>',
+            unsafe_allow_html=True
+        )
+
+        audio = st.audio_input(
+            "마이크를 눌러 질문하세요",
+            key=f"audio_{mode}"
+        )
+
+    st.write("")
+
+    # 아래 입력창과 첨부 버튼
+    attach_col, input_col, send_col = st.columns(
+        [1.5, 7, 1.3]
+    )
+
+    with attach_col:
+        with st.popover(
+            "➕ 첨부",
+            use_container_width=True
+        ):
+            uploaded_file = st.file_uploader(
+                "파일 첨부",
+                type=["txt"],
+                key=f"file_{mode}"
+            )
+
+            uploaded_image = st.file_uploader(
+                "사진 첨부",
+                type=["jpg", "jpeg", "png", "webp"],
+                key=f"image_{mode}"
+            )
+
+            st.caption(
+                "녹음은 위의 마이크 버튼을 이용하세요."
+            )
+
+    with input_col:
+        question = st.text_input(
+            "질문 입력",
+            placeholder="무엇을 도와드릴까요?",
+            label_visibility="collapsed",
+            key=f"text_{mode}"
+        )
+
+    with send_col:
+        send = st.button(
+            "➤",
+            type="primary",
+            use_container_width=True,
+            key=f"send_{mode}"
+        )
+
+    # 전송 버튼 클릭 시 AI 실행
+    if send:
+
+        final_question = question.strip()
+
+        try:
+            reference = read_text_file(uploaded_file)
+
+            # STT
+            if audio is not None:
+
+                with st.spinner("음성을 인식하고 있습니다..."):
+                    transcript = speech_to_text(audio)
+
+                    st.session_state.stt_result = transcript
+                    stt_placeholder.success(transcript)
+
+                    if not final_question:
+                        final_question = transcript
+
+            # 첨부 자료만 보낸 경우
+            if not final_question:
+
+                if uploaded_file is not None or uploaded_image is not None:
+                    final_question = (
+                        "첨부한 자료를 분석하고 요약해주세요."
+                    )
+                else:
+                    st.warning(
+                        "텍스트를 입력하거나 음성을 녹음해주세요."
+                    )
+                    return
+
+            # LLM
+            with st.spinner("답변을 준비하고 있습니다..."):
+
+                answer = ask_assistant(
+                    mode=mode,
+                    question=final_question,
+                    reference=reference,
+                    image=uploaded_image
+                )
+
+            st.session_state.last_answer = answer
+            st.session_state.last_question = final_question
+            st.session_state.last_mode = mode
+            st.session_state.last_audio = None
+
+            save_history(mode, final_question, answer)
+
+            # 회의 요약 결과 별도 보관
+            if mode == "회의 요약":
+
+                st.session_state.meetings.append({
+                    "title": final_question[:35],
+                    "summary": answer
+                })
+
+                st.session_state.meetings = (
+                    st.session_state.meetings[-10:]
+                )
+
+            # PPT 요구사항: 최종 답변 즉시 음성 출력
+            if st.session_state.auto_tts:
+
+                try:
+                    with st.spinner("음성 답변 생성 중..."):
+                        st.session_state.last_audio = (
+                            text_to_speech(answer)
+                        )
+                except Exception:
+                    st.warning(
+                        "텍스트 답변은 완료됐지만 "
+                        "음성 생성에 실패했습니다."
+                    )
+
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"AI 처리 중 오류: {e}")
+
+    # 답변 표시
+    show_answer(mode)
+
+
+# ==================================================
+# 9. 대시보드 - 그림판 왼쪽 화면
+# ==================================================
+
+if st.session_state.page == "대시보드":
+
+    if st.session_state.dashboard_view == "home":
+
+        st.title("🏠 대시보드")
+
+        st.write(
+            f"안녕하세요, "
+            f"{st.session_state.user_name}님!"
+        )
+
+        st.subheader("최근 회의 요약")
+
+        with st.container(border=True):
+
+            if st.session_state.meetings:
+
+                latest = st.session_state.meetings[-1]
+
+                st.markdown(latest["summary"][:1200])
+
+                if st.button("▶ 자세히 보기"):
+                    navigate("회의 요약")
+
+            else:
+                st.info("아직 저장된 회의 요약이 없습니다.")
+
+                if st.button("▶ 회의 요약 시작하기"):
+                    navigate("회의 요약")
+
+        st.write("")
+
+        st.subheader("AI 개인비서")
+
+        with st.container(border=True):
+
+            st.write(
+                "음성 또는 텍스트로 업무를 요청하세요."
+            )
+
+            if st.button(
+                "🎤 에이블과 대화 시작",
+                type="primary",
+                use_container_width=True
+            ):
+                navigate("대시보드", "assistant")
+
+        st.divider()
+
+        st.subheader("최근 대화")
+
+        if not st.session_state.history:
+            st.caption("대화 기록이 없습니다.")
+
+        for i, item in enumerate(
+            reversed(st.session_state.history[-5:]), 1
+        ):
+            with st.expander(
+                f"{i}. {item['question'][:40]}"
+            ):
+                st.write(item["answer"])
+
+    else:
+
+        st.title("🤖 AI 개인비서 에이블")
+
+        if st.button("← 대시보드로 돌아가기"):
+            navigate("대시보드", "home")
+
+        st.write(
+            "음성이나 텍스트로 질문하면 "
+            "에이블이 업무를 도와드립니다."
+        )
+
+        assistant_input("대시보드")
+
+
+# ==================================================
+# 10. 회의 요약 페이지
+# ==================================================
+
+elif st.session_state.page == "회의 요약":
+
+    st.title("📝 회의 요약")
+
+    st.write(
+        "회의 내용을 입력하거나 녹음하여 "
+        "핵심 내용과 결정사항을 요약하세요."
+    )
+
+    assistant_input("회의 요약")
+
+    st.divider()
+    st.subheader("저장된 회의 요약")
+
+    if not st.session_state.meetings:
+        st.info("저장된 회의 요약이 없습니다.")
+
+    for i, item in enumerate(
+        reversed(st.session_state.meetings), 1
+    ):
+        with st.expander(
+            f"회의 {i}: {item['title']}"
+        ):
+            st.markdown(item["summary"])
+
+
+# ==================================================
+# 11. 일정 관리 페이지
+# ==================================================
+
+elif st.session_state.page == "일정 관리":
+
+    st.title("📅 일정 관리")
+
+    st.write("일정을 등록하고 관리할 수 있습니다.")
+
+    with st.container(border=True):
+
+        schedule_title = st.text_input(
+            "일정 제목",
+            key="schedule_title"
+        )
+
+        schedule_date = st.date_input(
+            "날짜",
+            value=date.today(),
+            key="schedule_date"
+        )
+
+        schedule_memo = st.text_area(
+            "메모",
+            key="schedule_memo"
+        )
+
+        if st.button(
+            "➕ 일정 등록",
+            type="primary"
+        ):
+
+            if not schedule_title.strip():
+                st.warning("일정 제목을 입력해주세요.")
+
+            else:
+                st.session_state.schedules.append({
+                    "title": schedule_title.strip(),
+                    "date": str(schedule_date),
+                    "memo": schedule_memo
+                })
+
+                st.rerun()
+
+    st.subheader("등록된 일정")
+
+    schedules = sorted(
+        enumerate(st.session_state.schedules),
+        key=lambda x: x[1]["date"]
+    )
+
+    if not schedules:
+        st.info("등록된 일정이 없습니다.")
+
+    for index, item in schedules:
+
+        col1, col2 = st.columns([8, 1])
+
+        with col1:
+            st.write(
+                f"📌 {item['date']} | "
+                f"{item['title']}"
+            )
+
+            if item["memo"]:
+                st.caption(item["memo"])
+
+        with col2:
+            if st.button(
+                "삭제",
+                key=f"delete_schedule_{index}"
+            ):
+                st.session_state.schedules.pop(index)
+                st.rerun()
+
+    st.divider()
+    st.subheader("AI 일정 비서")
+
+    assistant_input("일정 관리")
+
+
+# ==================================================
+# 12. 최근 대화 히스토리
+# ==================================================
+
+st.divider()
+
+with st.expander("📜 최근 10개 대화 기록"):
+
+    if not st.session_state.history:
+        st.info("아직 저장된 대화가 없습니다.")
+
+    for i, item in enumerate(
+        reversed(st.session_state.history), 1
+    ):
+        with st.expander(
+            f"{i}. [{item['mode']}] "
+            f"{item['question'][:35]}"
+        ):
+            st.markdown("**사용자 질문**")
+            st.write(item["question"])
+
+            st.markdown("**에이블 답변**")
+            st.markdown(item["answer"])
+
+
+st.caption(
+    "AIVLE 비서 | KT AIVLE School AI 개인비서 미니 프로젝트"
+)
