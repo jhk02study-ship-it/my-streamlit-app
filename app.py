@@ -36,7 +36,14 @@ def build_retriever(pdf_bytes: bytes, digest: str):
     embeddings = OpenAIEmbeddings(model='text-embedding-3-small')
     # 파일 해시별로 격리된 임시 벡터 DB를 사용해 중복 적재를 방지합니다.
     store = Chroma.from_documents(chunks, embedding=embeddings, collection_name='aivle_' + digest[:20])
-    return store.as_retriever(search_kwargs={'k': 3})
+    return store.as_retriever(
+    search_type="mmr",
+    search_kwargs={
+        "k": 6,
+        "fetch_k": 20,
+        "lambda_mult": 0.7
+    }
+)
 
 prompt = ChatPromptTemplate.from_messages([
     ('system', '''당신은 KT AIVLE School 학습 도우미입니다.
