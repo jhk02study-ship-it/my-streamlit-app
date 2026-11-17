@@ -1,9 +1,7 @@
-streamlit
-openai
-langchain-core
-langchain-openai
-langchain-text-splitters
-langchain-pymupdf4llm
-langchain-chroma
-chromadb
-pymupdf4llm
+streamlit==1.64.0
+langchain-core==1.6.3
+langchain-openai==1.6.2
+langchain-text-splitters==1.1.2
+langchain-chroma==1.1.0
+chromadb==1.5.9
+langchain-pymupdf4llm==1.28.0
